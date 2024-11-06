@@ -1,8 +1,8 @@
 ## About
-This is an internal image, the [`straiproject/strai`](https://hub.docker.com/repository/docker/straiproject/strai) or [`straiproject/strai-ml`](https://hub.docker.com/repository/docker/straiproject/strai-ml) should be used!
+This is an internal image, the REPO STRAI should be used!
 
 
-This image  has the system-level dependencies for `Strai` and the `Strai Autoscaler`. The `strai-deps` image is built on top of this. This image is built periodically or when dependencies are added. [Find the Dockerfile here.](https://github.com/strai-project/strai/blob/master/docker/base-deps/Dockerfile)
+This image  has the system-level dependencies for `Strai` and the `Strai Autoscaler`. The `strai-deps` image is built on top of this. This image is built periodically or when dependencies are added.
 
 ## Tags
 
