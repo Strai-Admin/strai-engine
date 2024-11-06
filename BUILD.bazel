@@ -1,0 +1,2694 @@
+# Bazel build
+# C/C++ documentation: https://docs.bazel.build/versions/master/be/c-cpp.html
+
+# ************************** IMPORTANT ***********************
+# If a target or file is not found here, then please try searching in /src
+# We are in the middle of transitioning to a tree of build files.
+# If you would like to help with the move in your PR, please use `git mv` so that the history of the file is retained.
+
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_runtime", "py_runtime_pair")
+load("@rules_cc//cc:defs.bzl", "cc_proto_library")
+load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@com_github_grpc_grpc//bazel:cython_library.bzl", "pyx_library")
+load("@com_github_google_flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
+load("//bazel:strai.bzl", "COPTS", "PYX_COPTS", "PYX_SRCS", "copy_to_workspace", "strai_cc_binary", "strai_cc_library", "strai_cc_test")
+load("@python3_9//:defs.bzl", python39 = "interpreter")
+load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+# Hermetic python envionment, currently only used for CI infra and scripts.
+
+py_runtime(
+    name = "python3_runtime",
+    interpreter = python39,
+    python_version = "PY3",
+    visibility = ["//visibility:private"],
+)
+
+py_runtime_pair(
+    name = "python_runtime_pair",
+    py2_runtime = None,
+    py3_runtime = ":python3_runtime",
+    visibility = ["//visibility:private"],
+)
+
+constraint_setting(name = "hermetic")
+
+constraint_value(
+    name = "hermetic_python",
+    constraint_setting = ":hermetic",
+)
+
+toolchain(
+    name = "python_toolchain",
+    exec_compatible_with = [":hermetic_python"],
+    toolchain = ":python_runtime_pair",
+    toolchain_type = "@bazel_tools//tools/python:toolchain_type",
+)
+
+platform(
+    name = "hermetic_python_platform",
+    constraint_values = [":hermetic_python"],
+    parents = ["@local_config_platform//:host"],
+    visibility = ["//visibility:private"],
+)
+
+# C/C++ toolchain constraint configs.
+
+config_setting(
+    name = "msvc-cl",
+    flag_values = {"@bazel_tools//tools/cpp:compiler": "msvc-cl"},
+)
+
+config_setting(
+    name = "clang-cl",
+    flag_values = {"@bazel_tools//tools/cpp:compiler": "clang-cl"},
+)
+
+config_setting(
+    name = "opt",
+    values = {"compilation_mode": "opt"},
+)
+
+bool_flag(
+    name = "jemalloc_flag",
+    build_setting_default = True,
+)
+
+config_setting(
+    name = "jemalloc",
+    constraint_values = ["@platforms//os:linux"],
+    flag_values = {":jemalloc_flag": "true"},
+)
+
+# bazel run :refresh_compile_commands for compile_commands generation for clangd
+# https://github.com/hedronvision/bazel-compile-commands-extractor?tab=readme-ov-file#vscode - directions for clangd config
+refresh_compile_commands(
+    name = "refresh_compile_commands",
+    # Specify the targets of interest.
+    # For example, specify a dict of targets and any flags required to build.
+    targets = {
+      "//:strai_pkg": "",
+    },
+    exclude_external_sources = True, # removed below to have lsp index external cc files at the cost of 2x index time
+    # No need to add flags already in .bazelrc. They're automatically picked up.
+)
+
+# bazel run :refresh_compile_commands_external_sources for generation with external source files (cc files)
+refresh_compile_commands(
+    name = "refresh_compile_commands_external_sources",
+    targets = {
+      "//:strai_pkg": "",
+    },
+)
+
+# === Begin of rpc definitions ===
+# GRPC common lib.
+strai_cc_library(
+    name = "grpc_common_lib",
+    srcs = [
+        "src/strai/rpc/common.cc",
+        "src/strai/rpc/grpc_server.cc",
+        "src/strai/rpc/server_call.cc",
+        "src/strai/rpc/rpc_chaos.cc",
+    ],
+    hdrs = glob([
+        "src/strai/rpc/rpc_chaos.h",
+        "src/strai/rpc/client_call.h",
+        "src/strai/rpc/common.h",
+        "src/strai/rpc/grpc_client.h",
+        "src/strai/rpc/grpc_server.h",
+        "src/strai/rpc/metrics_agent_client.h",
+        "src/strai/rpc/server_call.h",
+        "src/strai/rpc/grpc_util.h",
+        "src/strai/strailet_client/*.h",
+    ]),
+    deps = [
+        ":stats_metric",
+        "//src/strai/common:asio",
+        "//src/strai/common:grpc_util",
+        "//src/strai/common:id",
+        "//src/strai/common:strai_config",
+        "//src/strai/common:status",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_github_grpc_grpc//:grpc++_reflection",
+        "@com_github_grpc_grpc//:grpcpp_admin",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+# Node manager gRPC lib.
+cc_grpc_library(
+    name = "node_manager_cc_grpc",
+    srcs = ["//src/strai/protobuf:node_manager_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:node_manager_cc_proto"],
+)
+
+# Node manager server and client.
+strai_cc_library(
+    name = "node_manager_rpc",
+    srcs = glob([
+        "src/strai/rpc/node_manager/*.cc",
+    ]),
+    hdrs = glob([
+        "src/strai/rpc/node_manager/*.h",
+    ]),
+    deps = [
+        ":grpc_common_lib",
+        ":node_manager_cc_grpc",
+        ":strai_common",
+        "@boost//:asio",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+# gcs_service gRPC lib.
+cc_grpc_library(
+    name = "gcs_service_cc_grpc",
+    srcs = ["//src/strai/protobuf:gcs_service_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:gcs_service_cc_proto"],
+)
+
+# gcs_service gRPC lib.
+cc_grpc_library(
+    name = "test_service_cc_grpc",
+    srcs = ["//src/strai/protobuf:test_service_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:test_service_cc_proto"],
+)
+
+# gcs rpc server and client.
+strai_cc_library(
+    name = "gcs_service_rpc",
+    hdrs = [
+        "src/strai/rpc/gcs_server/gcs_rpc_client.h",
+        "src/strai/rpc/gcs_server/gcs_rpc_server.h",
+    ],
+    deps = [
+        ":autoscaler_cc_grpc",
+        ":gcs_service_cc_grpc",
+        ":grpc_common_lib",
+        ":pubsub_lib",
+        ":strai_common",
+        "@boost//:asio",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/container:btree",
+    ],
+)
+
+# Object manager gRPC lib.
+cc_grpc_library(
+    name = "object_manager_cc_grpc",
+    srcs = ["//src/strai/protobuf:object_manager_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:object_manager_cc_proto"],
+)
+
+# Object manager rpc server and client.
+strai_cc_library(
+    name = "object_manager_rpc",
+    hdrs = glob([
+        "src/strai/rpc/object_manager/*.h",
+    ]),
+    deps = [
+        ":grpc_common_lib",
+        ":object_manager_cc_grpc",
+        ":strai_common",
+        "@boost//:asio",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+# Worker gRPC lib.
+cc_grpc_library(
+    name = "worker_cc_grpc",
+    srcs = ["//src/strai/protobuf:core_worker_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:worker_cc_proto"],
+)
+
+# worker server and client.
+strai_cc_library(
+    name = "worker_rpc",
+    srcs = glob([
+        "src/strai/rpc/worker/*.cc",
+    ]),
+    hdrs = glob([
+        "src/strai/rpc/worker/*.h",
+    ]),
+    deps = [
+        ":grpc_common_lib",
+        ":pubsub_lib",
+        ":strai_common",
+        ":worker_cc_grpc",
+        "@boost//:asio",
+        "@boost//:thread",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+# Metrics Agent gRPC lib.
+cc_grpc_library(
+    name = "reporter_cc_grpc",
+    srcs = ["//src/strai/protobuf:reporter_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:reporter_cc_proto"],
+)
+
+# Metrics Agent client.
+strai_cc_library(
+    name = "reporter_rpc",
+    hdrs = glob([
+        "src/strai/rpc/metrics_agent_client.h",
+    ]),
+    deps = [
+        ":grpc_common_lib",
+        ":reporter_cc_grpc",
+        "//src/strai/common:status",
+        "@boost//:asio",
+        "@boost//:thread",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
+# pubsub.
+cc_grpc_library(
+    name = "pubsub_cc_grpc",
+    srcs = ["//src/strai/protobuf:pubsub_proto"],
+    grpc_only = True,
+    deps = [
+        "//src/strai/protobuf:common_cc_proto",
+        "//src/strai/protobuf:gcs_cc_proto",
+        "//src/strai/protobuf:pubsub_cc_proto",
+    ],
+)
+
+strai_cc_library(
+    name = "pubsub_rpc",
+    deps = [
+        "pubsub_cc_grpc",
+        ":grpc_common_lib",
+        ":strai_common",
+    ],
+)
+
+cc_grpc_library(
+    name = "autoscaler_cc_grpc",
+    srcs = ["//src/strai/protobuf:autoscaler_proto"],
+    grpc_only = True,
+    deps = [
+        "//src/strai/protobuf:autoscaler_cc_proto",
+    ],
+)
+
+strai_cc_library(
+    name = "autoscaler_rpc",
+    deps = [
+        ":autoscaler_cc_grpc",
+    ],
+)
+
+# === End of rpc definitions ===
+
+# === Begin of plasma definitions ===
+
+# TODO(mehrdadn): (How to) support dynamic linking?
+PROPAGATED_WINDOWS_DEFINES = ["ARROW_STATIC"]
+
+PLASMA_COPTS = COPTS + select({
+    "@platforms//os:windows": [
+    ] + ["-D" + define for define in PROPAGATED_WINDOWS_DEFINES],
+    "//conditions:default": [
+        "-DARROW_USE_GLOG",
+    ],
+})
+
+PLASMA_LINKOPTS = [] + select({
+    "@platforms//os:windows": [
+        "-DefaultLib:" + "ws2_32.lib",
+    ],
+    "//conditions:default": [
+    ],
+})
+
+strai_cc_library(
+    name = "plasma_client",
+    srcs = [
+        "src/strai/object_manager/common.cc",
+        "src/strai/object_manager/plasma/client.cc",
+        "src/strai/object_manager/plasma/connection.cc",
+        "src/strai/object_manager/plasma/malloc.cc",
+        "src/strai/object_manager/plasma/plasma.cc",
+        "src/strai/object_manager/plasma/protocol.cc",
+        "src/strai/object_manager/plasma/shared_memory.cc",
+    ] + select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "src/strai/object_manager/plasma/fling.cc",
+        ],
+    }),
+    hdrs = [
+        "src/strai/object_manager/common.h",
+        "src/strai/object_manager/plasma/client.h",
+        "src/strai/object_manager/plasma/common.h",
+        "src/strai/object_manager/plasma/compat.h",
+        "src/strai/object_manager/plasma/connection.h",
+        "src/strai/object_manager/plasma/malloc.h",
+        "src/strai/object_manager/plasma/plasma.h",
+        "src/strai/object_manager/plasma/plasma_generated.h",
+        "src/strai/object_manager/plasma/protocol.h",
+        "src/strai/object_manager/plasma/shared_memory.h",
+    ] + select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "src/strai/object_manager/plasma/fling.h",
+        ],
+    }),
+    copts = PLASMA_COPTS,
+    defines = select({
+        "@platforms//os:windows": PROPAGATED_WINDOWS_DEFINES,
+        "//conditions:default": [],
+    }),
+    linkopts = PLASMA_LINKOPTS,
+    deps = [
+        ":plasma_fbs",
+        ":strai_common",
+        "//src/strai/protobuf:common_cc_proto",
+        "//src/strai/util",
+        "@msgpack",
+    ],
+)
+
+strai_cc_library(
+    name = "plasma_store_server_lib",
+    srcs = [
+        "src/strai/object_manager/plasma/create_request_queue.cc",
+        "src/strai/object_manager/plasma/dlmalloc.cc",
+        "src/strai/object_manager/plasma/eviction_policy.cc",
+        "src/strai/object_manager/plasma/get_request_queue.cc",
+        "src/strai/object_manager/plasma/object_lifecycle_manager.cc",
+        "src/strai/object_manager/plasma/object_store.cc",
+        "src/strai/object_manager/plasma/plasma_allocator.cc",
+        "src/strai/object_manager/plasma/stats_collector.cc",
+        "src/strai/object_manager/plasma/store.cc",
+        "src/strai/object_manager/plasma/store_runner.cc",
+    ],
+    hdrs = [
+        "src/strai/object_manager/common.h",
+        "src/strai/object_manager/plasma/allocator.h",
+        "src/strai/object_manager/plasma/create_request_queue.h",
+        "src/strai/object_manager/plasma/eviction_policy.h",
+        "src/strai/object_manager/plasma/get_request_queue.h",
+        "src/strai/object_manager/plasma/object_lifecycle_manager.h",
+        "src/strai/object_manager/plasma/object_store.h",
+        "src/strai/object_manager/plasma/plasma_allocator.h",
+        "src/strai/object_manager/plasma/stats_collector.h",
+        "src/strai/object_manager/plasma/store.h",
+        "src/strai/object_manager/plasma/store_runner.h",
+        "src/strai/thirdparty/dlmalloc.c",
+    ],
+    copts = PLASMA_COPTS,
+    linkopts = PLASMA_LINKOPTS,
+    deps = [
+        ":plasma_client",
+        ":stats_lib",
+        "//src/strai/common:network",
+    ],
+)
+
+FLATC_ARGS = [
+    "--gen-object-api",
+    "--gen-mutable",
+    "--scoped-enums",
+]
+
+flatbuffer_cc_library(
+    name = "plasma_fbs",
+    srcs = ["src/strai/object_manager/plasma/plasma.fbs"],
+    flatc_args = FLATC_ARGS,
+    out_prefix = "src/strai/object_manager/plasma/",
+)
+
+# === End of plasma definitions ===
+
+strai_cc_library(
+    name = "strai_mock",
+    hdrs = glob(
+        ["src/mock/**/*.h"],
+    ),
+)
+
+cc_grpc_library(
+    name = "strai_syncer_cc_grpc",
+    srcs = ["//src/strai/protobuf:strai_syncer_proto"],
+    grpc_only = True,
+    deps = ["//src/strai/protobuf:strai_syncer_cc_proto"],
+)
+
+strai_cc_library(
+    name = "strai_common",
+    deps = [
+        ":stats_metric",
+        "//src/strai/common:asio",
+        "//src/strai/common:constants",
+        "//src/strai/common:event_stats",
+        "//src/strai/common:file_system_monitor",
+        "//src/strai/common:grpc_util",
+        "//src/strai/common:id",
+        "//src/strai/common:memory_monitor",
+        "//src/strai/common:network",
+        "//src/strai/common:strai_config",
+        "//src/strai/common:strai_syncer",
+        "//src/strai/common:status",
+        "//src/strai/common:task_common",
+        "//src/strai/common:test_util",
+        "//src/strai/protobuf:gcs_cc_proto",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+strai_cc_binary(
+    name = "strailet",
+    srcs = ["src/strai/strailet/main.cc"],
+    visibility = ["//java:__subpackages__"],
+    deps = [
+        ":strailet_lib",
+        "//src/strai/util",
+        "@com_github_gflags_gflags//:gflags",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_pub_sub_lib",
+    srcs = [
+        "src/strai/gcs/pubsub/gcs_pub_sub.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/pubsub/gcs_pub_sub.h",
+    ],
+    deps = [
+        ":gcs",
+        ":gcs_service_rpc",
+        ":pubsub_lib",
+        ":strai_common",
+        ":redis_client",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_server_lib",
+    srcs = glob(
+        [
+            "src/strai/gcs/gcs_server/*.cc",
+        ],
+        exclude = [
+            "src/strai/gcs/gcs_server/gcs_server_main.cc",
+            "src/strai/gcs/gcs_server/test/*.cc",
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/strai/gcs/gcs_server/*.h",
+        ],
+    ),
+    deps = [
+        ":autoscaler_rpc",
+        ":gcs",
+        ":gcs_pub_sub_lib",
+        ":gcs_service_cc_grpc",
+        ":gcs_service_rpc",
+        ":gcs_table_storage_lib",
+        ":node_manager_rpc",
+        ":observable_store_client",
+        ":pubsub_lib",
+        ":strailet_client_lib",
+        ":scheduler",
+        ":worker_rpc",
+        "//src/strai/protobuf:agent_manager_cc_proto",
+        "@boost//:bimap",
+        "@com_github_grpc_grpc//src/proto/grpc/health/v1:health_proto",
+        "@com_google_absl//absl/container:btree",
+        "//src/strai/util:thread_checker",
+    ],
+)
+
+strai_cc_binary(
+    name = "gcs_server",
+    srcs = [
+        "src/strai/gcs/gcs_server/gcs_server_main.cc",
+    ],
+    visibility = ["//java:__subpackages__"],
+    deps = [
+        ":gcs_server_lib",
+        ":stats_lib",
+        "@com_github_gflags_gflags//:gflags",
+    ],
+)
+
+# Strai native pubsub module.
+strai_cc_library(
+    name = "pubsub_lib",
+    srcs = glob([
+        "src/strai/pubsub/*.cc",
+    ]),
+    hdrs = glob([
+        "src/strai/pubsub/*.h",
+    ]),
+    deps = [
+        ":pubsub_rpc",
+        "@boost//:any",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+strai_cc_library(
+    name = "stats_metric",
+    srcs = [
+        "src/strai/stats/metric.cc",
+        "src/strai/stats/metric_defs.cc",
+        "src/strai/stats/tag_defs.cc",
+    ],
+    hdrs = [
+        "src/strai/stats/metric.h",
+        "src/strai/stats/metric_defs.h",
+        "src/strai/stats/tag_defs.h",
+    ],
+    deps = [
+        "//src/strai/util",
+        "@com_github_jupp0r_prometheus_cpp//pull",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@io_opencensus_cpp//opencensus/exporters/stats/prometheus:prometheus_exporter",
+        "@io_opencensus_cpp//opencensus/exporters/stats/stdout:stdout_exporter",
+        "@io_opencensus_cpp//opencensus/stats",
+        "@io_opencensus_cpp//opencensus/tags",
+    ],
+)
+
+strai_cc_library(
+    name = "stats_lib",
+    srcs = [
+        "src/strai/stats/metric_exporter.cc",
+    ],
+    hdrs = [
+        "src/strai/stats/metric.h",
+        "src/strai/stats/metric_exporter.h",
+        "src/strai/stats/stats.h",
+        "src/strai/stats/tag_defs.h",
+    ],
+    linkopts = select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "-lpthread",
+        ],
+    }),
+    deps = [
+        ":reporter_rpc",
+        ":stats_metric",
+        "@com_github_grpc_grpc//:grpc_opencensus_plugin",
+    ],
+)
+
+strai_cc_library(
+    name = "scheduler",
+    srcs = glob(
+        [
+            "src/strai/strailet/scheduling/**/*.cc",
+        ],
+        exclude = [
+            "src/strai/strailet/scheduling/**/*_test.cc",
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/strai/strailet/scheduling/**/*.h",
+            "src/strai/core_worker/common.h",
+        ],
+    ),
+    linkopts = select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "-lpthread",
+        ],
+    }),
+    deps = [
+        ":gcs_client_lib",
+        ":strai_common",
+        ":stats_lib",
+        "//src/strai/protobuf:common_cc_proto",
+        "//src/strai/util",
+        "@boost//:asio",
+        "@boost//:system",
+        "@com_github_jupp0r_prometheus_cpp//pull",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/random:bit_gen_ref",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@io_opencensus_cpp//opencensus/exporters/stats/prometheus:prometheus_exporter",
+        "@io_opencensus_cpp//opencensus/stats",
+        "@io_opencensus_cpp//opencensus/tags",
+    ],
+)
+
+strai_cc_library(
+    name = "strailet_lib",
+    srcs = glob(
+        [
+            "src/strai/strailet/**/*.cc",
+        ],
+        exclude = [
+            "src/strai/strailet/**/*_test.cc",
+            "src/strai/strailet/scheduling/**/*.cc",
+            "src/strai/strailet/main.cc",
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/strai/strailet/**/*.h",
+        ],
+        exclude = [
+            "src/strai/strailet/scheduling/**/*.h",
+            "src/strai/strailet/main.cc",
+        ],
+    ),
+    linkopts = select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "-lpthread",
+        ],
+    }),
+    deps = [
+        ":gcs",
+        ":gcs_client_lib",
+        ":node_manager_fbs",
+        ":node_manager_rpc",
+        ":object_manager",
+        ":plasma_client",
+        ":pubsub_lib",
+        ":strai_common",
+        ":scheduler",
+        ":stats_lib",
+        ":worker_rpc",
+        "//src/strai/protobuf:agent_manager_cc_proto",
+        "//src/strai/protobuf:common_cc_proto",
+        "//src/strai/protobuf:runtime_env_agent_cc_proto",
+        "//src/strai/util",
+        "@boost//:asio",
+        "@boost//:beast",
+        "@boost//:system",
+        "@com_github_jupp0r_prometheus_cpp//pull",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@io_opencensus_cpp//opencensus/exporters/stats/prometheus:prometheus_exporter",
+        "@io_opencensus_cpp//opencensus/stats",
+        "@io_opencensus_cpp//opencensus/tags",
+    ],
+)
+
+strai_cc_library(
+    name = "strailet_client_lib",
+    srcs = glob([
+        "src/strai/strailet_client/*.cc",
+    ]),
+    hdrs = glob([
+        "src/strai/strailet_client/*.h",
+    ]),
+    linkopts = select({
+        "@platforms//os:windows": [
+        ],
+        "//conditions:default": [
+            "-lpthread",
+        ],
+    }),
+    deps = [
+        ":node_manager_fbs",
+        ":node_manager_rpc",
+        ":strai_common",
+        "//src/strai/protobuf:gcs_cc_proto",
+        "//src/strai/util",
+        "@boost//:asio",
+    ],
+)
+
+strai_cc_library(
+    name = "core_worker_lib",
+    srcs = glob(
+        [
+            "src/strai/core_worker/*.cc",
+            "src/strai/core_worker/store_provider/*.cc",
+            "src/strai/core_worker/store_provider/memory_store/*.cc",
+            "src/strai/core_worker/transport/*.cc",
+        ],
+        exclude = [
+            "src/strai/core_worker/**/*_test.cc",
+        ],
+    ),
+    hdrs = glob([
+        "src/strai/core_worker/*.h",
+        "src/strai/core_worker/store_provider/*.h",
+        "src/strai/core_worker/store_provider/memory_store/*.h",
+        "src/strai/core_worker/transport/*.h",
+    ]),
+    deps = [
+        ":gcs",
+        ":gcs_client_lib",
+        ":plasma_client",
+        ":strai_common",
+        ":strailet_client_lib",
+        ":stats_lib",
+        ":worker_rpc",
+        "//src/strai/protobuf:worker_cc_proto",
+        "//src/strai/util",
+        "@boost//:circular_buffer",
+        "@boost//:fiber",
+        "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@nlohmann_json",
+    ],
+)
+
+# This header is used to wrap some internal codes so we can reduce suspicious
+# symbols export.
+strai_cc_library(
+    name = "exported_internal",
+    srcs =
+        [
+            "src/strai/internal/internal.cc",
+        ],
+    hdrs =
+        [
+            "src/strai/internal/internal.h",
+        ],
+    copts = COPTS,
+    strip_include_prefix = "src",
+    deps = [
+        ":core_worker_lib",
+    ],
+    alwayslink = 1,
+)
+
+strai_cc_test(
+    name = "core_worker_resubmit_queue_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/core_worker_resubmit_queue_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "memory_store_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/memory_store_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":strai_mock",
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "direct_actor_transport_test",
+    srcs = ["src/strai/core_worker/test/direct_actor_transport_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "direct_actor_transport_mock_test",
+    srcs = ["src/strai/core_worker/test/direct_actor_transport_mock_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_function_manager_test",
+    srcs = ["src/strai/gcs/gcs_server/test/gcs_function_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "dependency_resolver_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/dependency_resolver_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "normal_task_submitter_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/normal_task_submitter_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "reference_count_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/reference_count_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "object_recovery_manager_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/object_recovery_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "scheduling_queue_test",
+    srcs = ["src/strai/core_worker/test/scheduling_queue_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "concurrency_group_manager_test",
+    srcs = ["src/strai/core_worker/test/concurrency_group_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "fiber_state_test",
+    srcs = ["src/strai/core_worker/test/fiber_state_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "actor_submit_queue_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/actor_submit_queue_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "task_manager_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/task_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "task_event_buffer_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/task_event_buffer_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "task_event_buffer_export_event_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/task_event_buffer_export_event_test.cc"],
+    tags = [
+        "team:core",
+        "no_windows"
+    ],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "actor_creator_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/actor_creator_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":gcs_client_lib",
+        ":strai_mock",
+        "//src/strai/common:test_util",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "generator_waiter_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/generator_waiter_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":gcs_client_lib",
+        ":strai_mock",
+        "//src/strai/common:test_util",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "actor_manager_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/actor_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "lease_policy_test",
+    size = "small",
+    srcs = ["src/strai/core_worker/test/lease_policy_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":core_worker_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "cluster_resource_scheduler_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/cluster_resource_scheduler_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_mock",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "local_resource_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/local_resource_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_mock",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "cluster_resource_scheduler_2_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/cluster_resource_scheduler_2_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "scheduling_policy_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/policy/scheduling_policy_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "hybrid_scheduling_policy_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/policy/hybrid_scheduling_policy_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":scheduler",
+        "@com_google_absl//absl/random:mock_distributions",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "cluster_task_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/cluster_task_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_mock",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "cluster_resource_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/scheduling/cluster_resource_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "local_object_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/test/local_object_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "pull_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/pull_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":object_manager",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "object_buffer_pool_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/object_buffer_pool_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":object_manager",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "ownership_based_object_directory_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/ownership_based_object_directory_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":object_manager",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "push_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/push_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "spilled_object_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/spilled_object_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@boost//:endian",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "fallback_allocator_test",
+    srcs = [
+        "src/strai/object_manager/plasma/test/fallback_allocator_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "object_store_test",
+    srcs = [
+        "src/strai/object_manager/plasma/test/object_store_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "mutable_object_test",
+    srcs = [
+        "src/strai/object_manager/plasma/test/mutable_object_test.cc",
+    ],
+    tags = [
+        "no_windows",
+        "team:core",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        ":core_worker_lib",
+        ":plasma_store_server_lib",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "mutable_object_provider_test",
+    srcs = [
+        "src/strai/core_worker/test/mutable_object_provider_test.cc",
+    ],
+    tags = [
+        "no_tsan",
+        "no_windows",
+        "team:core",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:osx": [],
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":core_worker_lib",
+        ":plasma_store_server_lib",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "object_lifecycle_manager_test",
+    srcs = [
+        "src/strai/object_manager/plasma/test/object_lifecycle_manager_test.cc",
+        "src/strai/object_manager/plasma/test/stats_collector_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_absl//absl/random",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "eviction_policy_test",
+    srcs = [
+        "src/strai/object_manager/plasma/test/eviction_policy_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "create_request_queue_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/create_request_queue_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "get_request_queue_test",
+    size = "small",
+    srcs = [
+        "src/strai/object_manager/test/get_request_queue_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":plasma_store_server_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "worker_pool_test",
+    size = "small",
+    srcs = ["src/strai/strailet/worker_pool_test.cc"],
+    tags = [
+        "no_tsan",
+        "team:core",
+    ],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_placement_group_manager_mock_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_placement_group_manager_mock_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "placement_group_resource_manager_test",
+    size = "small",
+    srcs = ["src/strai/strailet/placement_group_resource_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        "gcs_test_util_lib",
+        "strai_common",
+        "strailet_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "runtime_env_agent_client_test",
+    size = "small",
+    srcs = ["src/strai/strailet/runtime_env_agent_client_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        "gcs_test_util_lib",
+        "strai_common",
+        "strailet_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "dependency_manager_test",
+    size = "small",
+    srcs = ["src/strai/strailet/dependency_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "local_task_manager_test",
+    size = "small",
+    srcs = ["src/strai/strailet/local_task_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":strai_mock",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "wait_manager_test",
+    size = "small",
+    srcs = ["src/strai/strailet/wait_manager_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "worker_killing_policy_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/worker_killing_policy_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_common",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "worker_killing_policy_group_by_owner_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/worker_killing_policy_group_by_owner_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_common",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "worker_killing_policy_retriable_fifo_test",
+    size = "small",
+    srcs = [
+        "src/strai/strailet/worker_killing_policy_retriable_fifo_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":strai_common",
+        ":strailet_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "pubsub_integration_test",
+    size = "small",
+    srcs = ["src/strai/pubsub/test/integration_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":pubsub_cc_grpc",
+        ":pubsub_lib",
+        "//src/strai/protobuf:pubsub_cc_proto",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "publisher_test",
+    size = "small",
+    srcs = ["src/strai/pubsub/test/publisher_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":pubsub_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "subscriber_test",
+    size = "small",
+    srcs = [
+        "src/strai/pubsub/test/subscriber_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":pubsub_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "stats_test",
+    size = "small",
+    srcs = ["src/strai/stats/stats_test.cc"],
+    tags = [
+        "no_tsan",
+        "stats",
+        "team:core",
+    ],
+    deps = [
+        ":stats_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "metric_exporter_grpc_test",
+    size = "small",
+    srcs = [
+        "src/strai/stats/metric_exporter_grpc_test.cc",
+    ],
+    tags = [
+        "stats",
+        "team:core",
+    ],
+    deps = [
+        ":stats_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_test_util_lib",
+    hdrs = [
+        "src/strai/gcs/test/gcs_test_util.h",
+    ],
+    deps = [
+        ":gcs",
+        ":gcs_service_rpc",
+    ],
+)
+
+strai_cc_test(
+    name = "grpc_server_client_test",
+    size = "small",
+    srcs = [
+        "src/strai/rpc/test/grpc_server_client_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":grpc_common_lib",
+        ":test_service_cc_grpc",
+    ],
+)
+
+strai_cc_test(
+    name = "rpc_chaos_test",
+    size = "small",
+    srcs = [
+        "src/strai/rpc/test/rpc_chaos_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":grpc_common_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "core_worker_client_pool_test",
+    size = "small",
+    srcs = [
+        "src/strai/rpc/worker/test/core_worker_client_pool_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":worker_rpc",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_server_rpc_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_server_rpc_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = [
+        "no_tsan",
+        "no_windows",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_kv_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_kv_manager_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_server_test_util",
+    hdrs = [
+        "src/strai/gcs/gcs_server/test/gcs_server_test_util.h",
+    ],
+    deps = [
+        ":gcs_client_lib",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_health_check_manager_test",
+    size = "medium",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_health_check_manager_test.cc",
+    ],
+    tags = [
+        "no_windows",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_server_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_node_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_node_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_job_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_job_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_task_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_task_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_placement_group_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_placement_group_manager_test.cc",
+    ],
+    tags = [
+        "no_tsan",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_placement_group_scheduler_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_placement_group_scheduler_test.cc",
+    ],
+    tags = [
+        "no_tsan",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_actor_scheduler_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_actor_scheduler_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_client_lib",
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_actor_scheduler_mock_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_actor_scheduler_mock_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_actor_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_actor_manager_test.cc",
+    ],
+    tags = [
+        "no_tsan",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_worker_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_worker_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_table_storage_lib",
+    srcs = glob(
+        [
+            "src/strai/gcs/gcs_server/gcs_table_storage.cc",
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/strai/gcs/gcs_server/gcs_table_storage.h",
+        ],
+    ),
+    deps = [
+        ":gcs",
+        ":gcs_in_memory_store_client",
+        ":observable_store_client",
+        ":pubsub_lib",
+        ":strai_common",
+        ":redis_store_client",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_table_storage_test_lib",
+    hdrs = [
+        "src/strai/gcs/gcs_server/test/gcs_table_storage_test_base.h",
+    ],
+    deps = [
+        "redis_store_client",
+    ],
+)
+
+strai_cc_test(
+    name = "redis_gcs_table_storage_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/redis_gcs_table_storage_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_table_storage_lib",
+        ":gcs_table_storage_test_lib",
+        ":gcs_test_util_lib",
+        ":store_client_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "in_memory_gcs_table_storage_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/in_memory_gcs_table_storage_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_table_storage_lib",
+        ":gcs_table_storage_test_lib",
+        ":gcs_test_util_lib",
+        ":store_client_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_autoscaler_state_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_autoscaler_state_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_resource_manager_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/gcs_resource_manager_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+
+strai_cc_test(
+    name = "usage_stats_client_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_server/test/usage_stats_client_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+
+strai_cc_library(
+    name = "gcs_client_lib",
+    srcs = [
+        "src/strai/gcs/gcs_client/accessor.cc",
+        "src/strai/gcs/gcs_client/gcs_client.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/gcs_client/accessor.h",
+        "src/strai/gcs/gcs_client/gcs_client.h",
+    ],
+    deps = [
+        ":gcs",
+        ":gcs_pub_sub_lib",
+        ":gcs_service_rpc",
+        ":pubsub_lib",
+        ":strai_common",
+        ":redis_store_client",
+        "//src/strai/protobuf:usage_cc_proto",
+    ],
+)
+
+strai_cc_library(
+    name = "global_state_accessor_lib",
+    srcs = glob(
+        [
+            "src/strai/gcs/gcs_client/global_state_accessor.cc",
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/strai/gcs/gcs_client/global_state_accessor.h",
+        ],
+    ),
+    deps = [
+        ":gcs_client_lib",
+    ],
+)
+
+strai_cc_test(
+    name = "accessor_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_client/test/accessor_test.cc",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_client_lib",
+        ":gcs_test_util_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "global_state_accessor_test",
+    size = "small",
+    srcs = [
+        "src/strai/gcs/gcs_client/test/global_state_accessor_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_client_lib",
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        ":global_state_accessor_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_client_test",
+    size = "medium",
+    srcs = [
+        "src/strai/gcs/gcs_client/test/gcs_client_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = [
+        "no_tsan",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_client_lib",
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_client_reconnection_test",
+    srcs = [
+        "src/strai/gcs/gcs_client/test/gcs_client_reconnection_test.cc",
+    ],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = [
+        "no_windows",
+        "team:core",
+    ],
+    deps = [
+        ":gcs_client_lib",
+        ":gcs_server_lib",
+        ":gcs_test_util_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_library(
+    name = "object_manager",
+    srcs = glob([
+        "src/strai/object_manager/*.cc",
+        "src/strai/object_manager/notification/*.cc",
+    ]),
+    hdrs = glob([
+        "src/strai/object_manager/*.h",
+        "src/strai/object_manager/notification/*.h",
+    ]),
+    deps = [
+        ":core_worker_lib",
+        ":gcs",
+        ":object_manager_rpc",
+        ":plasma_store_server_lib",
+        ":strai_common",
+        "//src/strai/util",
+        "@boost//:asio",
+    ],
+)
+
+strai_cc_library(
+    name = "platform_shims",
+    srcs = [] + select({
+        "@platforms//os:windows": glob([
+            "src/shims/windows/**/*.c",
+            "src/shims/windows/**/*.cc",
+            "src/shims/windows/**/*.h",
+        ]),
+        "//conditions:default": [],
+    }),
+    hdrs = [] + select({
+        "@platforms//os:windows": glob([
+            "src/shims/windows/**/*.h",
+        ]),
+        "//conditions:default": [],
+    }),
+    strip_include_prefix = select({
+        "@platforms//os:windows": "src/shims/windows",
+        "//conditions:default": "",
+    }),
+)
+
+filegroup(
+    name = "extra_actions_base_proto",
+    srcs = [
+        "thirdparty/protobuf/extra_actions_base.proto",
+    ],
+)
+
+proto_library(
+    name = "extra_actions_base_proto_lib",
+    srcs = ["thirdparty/protobuf/extra_actions_base.proto"],
+)
+
+cc_proto_library(
+    name = "extra_actions_cc_proto_lib",
+    deps = [":extra_actions_base_proto_lib"],
+)
+
+filegroup(
+    name = "iwyu_sh",
+    srcs = ["ci/run/iwyu.sh"],
+)
+
+action_listener(
+    name = "iwyu_cpp",
+    extra_actions = [":iwyu_action"],
+    mnemonics = ["CppCompile"],
+)
+
+extra_action(
+    name = "iwyu_action",
+    cmd = "$(location :iwyu_sh) postbuild $(location @com_google_protobuf//:protoc) $(location :extra_actions_base_proto) --extra_action_file=$(EXTRA_ACTION_FILE) > $(output $(ACTION_ID).iwyu.txt)",
+    out_templates = [
+        "$(ACTION_ID).iwyu.txt",
+    ],
+    tools = [
+        ":extra_actions_base_proto",
+        ":iwyu_sh",
+        "@com_google_protobuf//:protoc",
+    ],
+)
+
+strai_cc_library(
+    name = "sha256",
+    srcs = [
+        "src/strai/thirdparty/sha256.c",
+    ],
+    hdrs = [
+        "src/strai/thirdparty/sha256.h",
+    ],
+)
+
+strai_cc_library(
+    name = "aligned_alloc",
+    srcs = [
+        "src/strai/thirdparty/aligned_alloc.c",
+    ],
+    hdrs = [
+        "src/strai/thirdparty/aligned_alloc.h",
+    ],
+)
+
+alias(
+    name = "hiredis",
+    actual = "@com_github_redis_hiredis//:hiredis",
+)
+
+strai_cc_library(
+    name = "redis_client",
+    srcs = [
+        "src/strai/gcs/asio.cc",
+        "src/strai/gcs/redis_async_context.cc",
+        "src/strai/gcs/redis_client.cc",
+        "src/strai/gcs/redis_context.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/asio.h",
+        "src/strai/gcs/redis_async_context.h",
+        "src/strai/gcs/redis_client.h",
+        "src/strai/gcs/redis_context.h",
+    ],
+    deps = [
+        ":hiredis",
+        ":strai_common",
+        ":stats_lib",
+        "//src/strai/util",
+        "@boost//:asio",
+    ],
+)
+
+strai_cc_library(
+    name = "redis_store_client",
+    srcs = [
+        "src/strai/gcs/store_client/redis_store_client.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/callback.h",
+        "src/strai/gcs/store_client/redis_store_client.h",
+        "src/strai/gcs/store_client/store_client.h",
+    ],
+    deps = [
+        "redis_client",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs_in_memory_store_client",
+    srcs = [
+        "src/strai/gcs/store_client/in_memory_store_client.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/callback.h",
+        "src/strai/gcs/store_client/in_memory_store_client.h",
+        "src/strai/gcs/store_client/store_client.h",
+    ],
+    deps = [
+        ":strai_common",
+        "//src/strai/util",
+    ],
+)
+
+strai_cc_library(
+    name = "observable_store_client",
+    srcs = [
+        "src/strai/gcs/store_client/observable_store_client.cc",
+    ],
+    hdrs = [
+        "src/strai/gcs/callback.h",
+        "src/strai/gcs/store_client/observable_store_client.h",
+        "src/strai/gcs/store_client/store_client.h",
+    ],
+    deps = [
+        ":strai_common",
+        "//src/strai/util",
+    ],
+)
+
+strai_cc_library(
+    name = "store_client_test_lib",
+    hdrs = [
+        "src/strai/gcs/store_client/test/store_client_test_base.h",
+    ],
+    deps = [
+        "redis_store_client",
+    ],
+)
+
+strai_cc_test(
+    name = "redis_store_client_test",
+    size = "small",
+    srcs = ["src/strai/gcs/store_client/test/redis_store_client_test.cc"],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":redis_store_client",
+        ":store_client_test_lib",
+        "@boost//:optional",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "chaos_redis_store_client_test",
+    size = "small",
+    srcs = ["src/strai/gcs/store_client/test/redis_store_client_test.cc"],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    env = {"REDIS_CHAOS": "1"},
+    tags = [
+        "no_windows",
+        "team:core",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = [
+        ":redis_store_client",
+        ":store_client_test_lib",
+        "@boost//:optional",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "in_memory_store_client_test",
+    size = "small",
+    srcs = ["src/strai/gcs/store_client/test/in_memory_store_client_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_in_memory_store_client",
+        ":store_client_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "observable_store_client_test",
+    size = "small",
+    srcs = ["src/strai/gcs/store_client/test/in_memory_store_client_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":gcs_in_memory_store_client",
+        ":observable_store_client",
+        ":store_client_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_library(
+    name = "gcs",
+    srcs = glob(
+        [
+            "src/strai/gcs/*.cc",
+        ],
+        exclude = [
+            "src/strai/gcs/*_test.cc",
+        ],
+    ),
+    hdrs = glob([
+        "src/strai/gcs/*.h",
+    ]),
+    deps = [
+        ":hiredis",
+        ":node_manager_fbs",
+        ":node_manager_rpc",
+        ":strai_common",
+        ":stats_lib",
+        "//src/strai/protobuf:agent_manager_cc_proto",
+        "//src/strai/protobuf:gcs_cc_proto",
+        "//src/strai/protobuf:gcs_service_cc_proto",
+        "//src/strai/util",
+        "@boost//:asio",
+    ],
+)
+
+strai_cc_test(
+    name = "callback_reply_test",
+    size = "small",
+    srcs = ["src/strai/gcs/test/callback_reply_test.cc"],
+    tags = ["team:core"],
+    deps = [
+        ":gcs",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "asio_test",
+    size = "small",
+    srcs = ["src/strai/gcs/test/asio_test.cc"],
+    args = [
+        "$(location redis-server)",
+        "$(location redis-cli)",
+    ],
+    data = [
+        "//:redis-cli",
+        "//:redis-server",
+    ],
+    tags = ["team:core"],
+    deps = [
+        ":gcs",
+        "//src/strai/util",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+strai_cc_test(
+    name = "gcs_export_event_test",
+    size = "small",
+    srcs = glob([
+        "src/strai/gcs/gcs_server/test/export_api/*.cc",
+    ]),
+    tags = [
+        "no_windows",
+        "team:core"
+    ],
+    deps = [
+        ":gcs_server_lib",
+        ":gcs_server_test_util",
+        ":gcs_test_util_lib",
+        ":strai_mock",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+flatbuffer_cc_library(
+    name = "node_manager_fbs",
+    srcs = ["src/strai/strailet/format/node_manager.fbs"],
+    flatc_args = FLATC_ARGS,
+    out_prefix = "strai/strailet/format/",
+)
+
+strai_cc_library(
+    name = "python_callbacks",
+    hdrs = [
+        "src/strai/gcs/gcs_client/python_callbacks.h",
+    ],
+)
+
+pyx_library(
+    name = "_strailet",
+    srcs = glob([
+        "python/strai/__init__.py",
+        "python/strai/_strailet.pxd",
+        "python/strai/_strailet.pyx",
+        "python/strai/includes/*.pxd",
+        "python/strai/includes/*.pxi",
+    ]),
+    # Export strai ABI symbols, which can then be used by _streaming.so.
+    # We need to dlopen this lib with RTLD_GLOBAL to use ABI in this
+    # shared lib, see python/strai/__init__.py.
+    cc_kwargs = dict(
+        srcs = PYX_SRCS,
+        copts = COPTS + PYX_COPTS,
+        # see https://github.com/tensorflow/tensorflow/blob/r2.1/tensorflow/lite/BUILD#L444
+        linkopts = select({
+            "@platforms//os:osx": [
+                "-Wl,-exported_symbols_list,$(location //:src/strai/strai_exported_symbols.lds)",
+            ],
+            "@platforms//os:windows": [],
+            "//conditions:default": [
+                "-Wl,--version-script,$(location //:src/strai/strai_version_script.lds)",
+            ],
+        }),
+        linkstatic = 1,
+    ),
+    deps = [
+        ":python_callbacks",
+        "//:core_worker_lib",
+        "//:exported_internal",
+        "//:gcs_server_lib",
+        "//:global_state_accessor_lib",
+        "//:strailet_lib",
+        "//:redis_client",
+        "//:src/strai/strai_exported_symbols.lds",
+        "//:src/strai/strai_version_script.lds",
+        "//:stats_lib",
+        "//src/strai/protobuf:serialization_cc_proto",
+        "//src/strai/util",
+    ],
+)
+
+strai_cc_binary(
+    name = "libcore_worker_library_java.so",
+    srcs = glob([
+        "src/strai/core_worker/lib/java/*.h",
+        "src/strai/core_worker/lib/java/*.cc",
+    ]),
+    # Export strai ABI symbols, which can then be used by libstreaming_java.so. see `//:_strailet`
+    linkopts = select({
+        "@platforms//os:osx": [
+            "-Wl,-exported_symbols_list,$(location //:src/strai/strai_exported_symbols.lds)",
+        ],
+        "@platforms//os:windows": [],
+        "//conditions:default": [
+            "-Wl,--version-script,$(location //:src/strai/strai_version_script.lds)",
+        ],
+    }),
+    linkshared = 1,
+    linkstatic = 1,
+    visibility = ["//java:__subpackages__"],
+    deps = [
+        "//:core_worker_lib",
+        "//:exported_internal",
+        "//:global_state_accessor_lib",
+        "//:src/strai/strai_exported_symbols.lds",
+        "//:src/strai/strai_version_script.lds",
+        "//:stats_lib",
+        "@bazel_tools//tools/jdk:jni",
+    ],
+)
+
+filegroup(
+    name = "python_sources",
+    srcs = glob([
+        "python/strai/*.py",
+        "python/strai/autoscaler/*.py",
+        "python/strai/autoscaler/_private/*.py",
+        "python/strai/autoscaler/_private/_azure/*.json",
+        "python/strai/autoscaler/aws/defaults.yaml",
+        "python/strai/autoscaler/azure/defaults.yaml",
+        "python/strai/autoscaler/gcp/defaults.yaml",
+        "python/strai/autoscaler/local/defaults.yaml",
+        "python/strai/autoscaler/vsphere/defaults.yaml",
+        "python/strai/cloudpickle/*.py",
+        "python/strai/core/__init__.py",
+        "python/strai/core/generated/__init__.py",
+        "python/strai/core/generated/strai/__init__.py",
+        "python/strai/core/generated/strai/protocol/__init__.py",
+        "python/strai/dashboard/**/*.py",
+        "python/strai/experimental/*.py",
+        "python/strai/util/*.py",
+        "python/strai/internal/*.py",
+        "python/strai/workers/default_worker.py",
+    ]),
+)
+
+alias(
+    name = "redis-server",
+    actual = select({
+        "@platforms//os:windows": "@com_github_tporadowski_redis_bin//:redis-server.exe",
+        "//conditions:default": "@com_github_antirez_redis//:redis-server",
+    }),
+)
+
+alias(
+    name = "redis-cli",
+    actual = select({
+        "@platforms//os:windows": "@com_github_tporadowski_redis_bin//:redis-cli.exe",
+        "//conditions:default": "@com_github_antirez_redis//:redis-cli",
+    }),
+)
+
+filegroup(
+    name = "all_py_proto",
+    srcs = [
+        "//src/strai/protobuf:agent_manager_py_proto",
+        "//src/strai/protobuf:autoscaler_py_proto",
+        "//src/strai/protobuf:common_py_proto",
+        "//src/strai/protobuf:core_worker_py_proto",
+        "//src/strai/protobuf:event_py_proto",
+        "//src/strai/protobuf:gcs_py_proto",
+        "//src/strai/protobuf:gcs_service_py_proto",
+        "//src/strai/protobuf:instance_manager_py_proto",
+        "//src/strai/protobuf:job_agent_py_proto",
+        "//src/strai/protobuf:node_manager_py_proto",
+        "//src/strai/protobuf:strai_client_py_proto",
+        "//src/strai/protobuf:reporter_py_proto",
+        "//src/strai/protobuf:runtime_env_agent_py_proto",
+        "//src/strai/protobuf:runtime_env_common_py_proto",
+        "//src/strai/protobuf:usage_py_proto",
+        "//src/strai/protobuf:export_event_py_proto",
+    ],
+)
+
+filegroup(
+    name = "serve_py_proto",
+    srcs = [
+        "//src/strai/protobuf:serve_py_proto",
+    ],
+)
+
+# This is a dummy test dependency that causes the python tests to be
+# re-run if any of these files changes.
+py_library(
+    name = "strai_lib",
+    srcs = glob(
+        ["python/strai/**/*.py"],
+        exclude = ["python/strai/tests/*.py"],
+    ),
+    visibility = ["__subpackages__"],
+)
+
+copy_to_workspace(
+    name = "cp_strailet_so",
+    srcs = ["python/strai/_strailet.so"],
+    dstdir = "python/strai",
+)
+
+copy_to_workspace(
+    name = "cp_all_py_proto",
+    srcs = [":all_py_proto"],
+    dstdir = "python/strai/core/generated",
+)
+
+copy_to_workspace(
+    name = "cp_serve_py_proto",
+    srcs = [":serve_py_proto"],
+    dstdir = "python/strai/serve/generated",
+)
+
+copy_to_workspace(
+    name = "cp_redis",
+    srcs = [
+        ":redis-cli",
+        ":redis-server",
+    ],
+    dstdir = "python/strai/core/src/strai/thirdparty/redis/src",
+)
+
+copy_to_workspace(
+    name = "cp_strailet",
+    srcs = [":strailet"],
+    dstdir = "python/strai/core/src/strai/strailet",
+)
+
+copy_to_workspace(
+    name = "cp_gcs_server",
+    srcs = [":gcs_server"],
+    dstdir = "python/strai/core/src/strai/gcs",
+)
+
+copy_to_workspace(
+    name = "cp_jemalloc",
+    srcs = ["@jemalloc//:shared"],
+    dstdir = "python/strai/core/",
+)
+
+genrule(
+    name = "install_py_proto",
+    srcs = [
+        ":cp_all_py_proto",
+        ":cp_serve_py_proto",
+    ],
+    outs = ["install_py_proto.out"],
+    cmd = """
+        # NOTE(hchen): Protobuf doesn't allow specifying Python package name. So we use this `sed`
+        # command to change the import path in the generated file.
+        # shellcheck disable=SC2006
+        files=(
+            `ls python/strai/core/generated/*_pb2*.py` \
+            `ls python/strai/serve/generated/*_pb2*.py` \
+            )
+        sed -i -E 's/from src.strai.protobuf/from ./' "$${files[@]}"
+        # Help the generated serve files to have the correct module
+        serve_files=(`ls python/strai/serve/generated/*_pb2*.py`)
+        sed -i -E 's/'"'"'src.strai.protobuf./'"'"'strai.serve.generated./' "$${serve_files[@]}"
+        # TODO(sang): Build our own proto instead of creating a new proto for opencensus separately.
+        # https://github.com/strai-project/strai/issues/31358
+        sed -i -E 's/from opencensus.proto.metrics.v1 import/from . import/' "$${files[@]}"
+        sed -i -E 's/from opencensus.proto.resource.v1 import/from . import/' "$${files[@]}"
+        # TODO(rickyx): Remove this experimental path rewrite once we move autoscaler proto out
+        # of experimental.
+        autoscale_files=(`ls python/strai/core/generated/instance_manager_pb2*.py`)
+        sed -i -E 's/from ..experimental/from ./' "$${autoscale_files[@]}"
+        # Help the generated export api files to have the correct module
+        export_api_files=(`ls python/strai/core/generated/export*_pb2*.py`)
+        sed -i -E 's/from ..export_api/from ./' "$${export_api_files[@]}"
+        echo "$${PWD}" > $@
+    """,
+    local = 1,
+)
+
+genrule(
+    name = "strai_pkg",
+    srcs = [
+        ":cp_strailet_so",
+        ":python_sources",
+        ":install_py_proto",
+        ":cp_redis",
+        ":cp_strailet",
+        ":cp_gcs_server",
+    ] + select({
+        ":jemalloc": [
+            ":cp_jemalloc",
+        ],
+        "//conditions:default": [],
+    }),
+    outs = ["strai_pkg.out"],
+    cmd = """
+        if [ "$${OSTYPE-}" = "msys" ]; then
+            ln -P -f -- python/strai/_strailet.so python/strai/_strailet.pyd
+        fi
+        echo "$${PWD}" > $@
+    """,
+    local = 1,
+)
