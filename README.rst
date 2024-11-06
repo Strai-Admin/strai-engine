@@ -1,5 +1,3 @@
-.. image:: https://github.com/strai-project/strai/raw/master/doc/source/images/strai_header_logo.png
-
 .. image:: https://readthedocs.org/projects/strai/badge/?version=master
     :target: http://docs.strai.io/en/master/?badge=master
 
