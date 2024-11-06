@@ -14,7 +14,7 @@ key="$1"
 case $key in
     --release-tag)
     shift
-    IMAGE=$1
+    IMAGE=$2
     ;;
     *)
     echo "Usage: fix-docker-latest.sh --release-tag <TAG>"
