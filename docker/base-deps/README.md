@@ -39,4 +39,4 @@ Please note that suffixes are only used to specify `aarch64` images. No suffix m
 
 ----
 
-See [`straiproject/strai`](https://hub.docker.com/repository/docker/straiproject/strai) for Strai and all of its dependencies.
+See Strai and all of its dependencies.
