@@ -1,6 +1,8 @@
 
+What is  Strai?
+--------
 
-Strai is a unified framework for scaling AI and Python applications. Strai consists of a core distributed runtime and a set of AI libraries for simplifying ML compute:
+Strai is a unified framework for scaling AI and Python applications for deploying RWA and DePin solutions. Strai consists of a core distributed runtime and a set of AI libraries for simplifying ML compute:
 
 
 
@@ -39,46 +41,3 @@ Strai is a unified way to scale Python and AI applications from a laptop to a cl
 
 With Strai, you can seamlessly scale the same code from a laptop to a cluster. Strai is designed to be general-purpose, meaning that it can performantly run any kind of workload. If your application is written in Python, you can scale it with Strai, no other infrastructure required.
 
-
-Getting Involved
-----------------
-
-.. list-table::
-   :widths: 25 50 25 25
-   :header-rows: 1
-
-   * - Platform
-     - Purpose
-     - Estimated Response Time
-     - Support Level
-   * - `Discourse Forum`_
-     - For discussions about development and questions about usage.
-     - < 1 day
-     - Community
-   * - `GitHub Issues`_
-     - For reporting bugs and filing feature requests.
-     - < 2 days
-     - Strai OSS Team
-   * - `Slack`_
-     - For collaborating with other Strai users.
-     - < 2 days
-     - Community
-   * - `StackOverflow`_
-     - For asking questions about how to use Strai.
-     - 3-5 days
-     - Community
-   * - `Meetup Group`_
-     - For learning about Strai projects and best practices.
-     - Monthly
-     - Strai DevRel
-   * - `Twitter`_
-     - For staying up-to-date on new features.
-     - Daily
-     - Strai DevRel
-
-.. _`Discourse Forum`: https://t.me/strai_io
-.. _`GitHub Issues`: https://t.me/strai_io_chat
-.. _`StackOverflow`: https://t.me/strai_io_chat
-.. _`Meetup Group`: https://t.me/strai_io_chat
-.. _`Twitter`: https://x.com/strai_io
-.. _`Slack`: https://t.me/strai_io_chat
