@@ -17,11 +17,11 @@ We welcome contributions! See `Getting Involved`_. To set up your development en
 the `Setting up your development environment`_ section.
 
 
-.. _`Discourse forum`: https://discuss.strai.io/
-.. _`GitHub Issues`: https://github.com/strai-project/strai/issues
-.. _`StackOverflow`: https://stackoverflow.com/questions/tagged/strai
-.. _`Getting Involved`: https://docs.strai.io/en/latest/strai-contribute/getting-involved.html
-.. _`Setting up your development environment`: https://docs.strai.io/en/latest/strai-contribute/getting-involved.html#setting-up-your-development-environment
+.. _`Discourse forum`
+.. _`GitHub Issues`
+.. _`StackOverflow`
+.. _`Getting Involved`
+.. _`Setting up your development environment`
 
 PR Review Process
 -----------------
