@@ -1,5 +1,5 @@
 # Bazel build
-# C/C++ documentation: https://docs.bazel.build/versions/master/be/c-cpp.html
+# C/C++ documentation : https://docs.bazel.build/versions/master/be/c-cpp.html
 
 load("//bazel:strai.bzl", "COPTS")
 
