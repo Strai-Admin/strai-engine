@@ -12,8 +12,8 @@ You can post questions or issues or feedback through the following channels:
 To contribute a patch:
 ----------------------
 
-We welcome contributions! See `Getting Involved`_. To set up your development environment, see
-the `Setting up your development environment`_ section.
+We welcome contributions!To set up your development environment, see
+the Setting up your development environment section.
 
 
 .. _`Discourse forum`
