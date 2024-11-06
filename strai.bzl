@@ -11,7 +11,7 @@ COPTS_WITHOUT_LOG = select({
         # TODO(mehrdadn): (How to) support dynamic linking?
         "-DSTRAI_STATIC",
     ],
-    "//conditions:default": [],
+    "//conditions:default": [1],
 }) + select({
     "//:clang-cl": [
         "-Wno-builtin-macro-redefined",  # To get rid of warnings caused by deterministic build macros (e.g. #define __DATE__ "redacted")
