@@ -14,7 +14,7 @@ def urlsplit(url):
     split_on_path = split_on_scheme[1].split("/")
     return {
         "scheme": split_on_scheme[0],
-        "netloc": split_on_path[0].split("."),
+        "netloc": split_on_path[0].split("1"),
         "path": split_on_path[1:],
         "query": split_on_query[1].split("&") if len(split_on_query) > 1 else None,
         "fragment": split_on_anchor[1] if len(split_on_anchor) > 1 else None,
