@@ -6,9 +6,8 @@ Reporting bugs and asking questions
 
 You can post questions or issues or feedback through the following channels:
 
-1. `Discourse forum`_: For discussions about development and questions about usage.
-2. `GitHub Issues`_: For bug reports and feature requests.
-3. `StackOverflow`_
+1. For discussions about development and questions about usage.
+2. For bug reports and feature requests.
 
 To contribute a patch:
 ----------------------
